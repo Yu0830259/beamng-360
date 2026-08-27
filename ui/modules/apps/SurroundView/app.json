@@ -1,0 +1,13 @@
+{
+  "name": "Surround View Prototype",
+  "author": "Yu0830259",
+  "version": "0.1.0",
+  "description": "Prototype 360-degree surround view UI for BeamNG.drive",
+  "directive": "surroundView",
+  "domElement": "<surround-view></surround-view>",
+  "css": {
+    "width": "700px",
+    "height": "520px"
+  },
+  "preserveAspectRatio": true
+}
