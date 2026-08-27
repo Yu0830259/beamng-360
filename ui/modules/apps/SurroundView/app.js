@@ -21,6 +21,7 @@ angular.module('beamng.apps')
         if (!statusText) return
         statusText.textContent = message || state || 'UNKNOWN'
         statusText.setAttribute('data-state', state || '')
+        statusText.title = message || ''
       }
 
       function drawRgbFrame(frame) {
@@ -33,7 +34,7 @@ angular.module('beamng.apps')
           var pixelCount = width * height
 
           if (binary.length < pixelCount * 3) {
-            setStatus('error', 'FRAME SIZE ERROR')
+            setStatus('error', 'FRAME SIZE ERROR: ' + binary.length)
             return
           }
 
@@ -56,7 +57,7 @@ angular.module('beamng.apps')
           rear.classList.add('sv-camera--live')
           setStatus('live', 'REAR LIVE')
         } catch (err) {
-          setStatus('error', 'FRAME DECODE ERROR')
+          setStatus('error', 'FRAME DECODE ERROR: ' + String(err))
           console.error('SurroundView rear frame error', err)
         }
       }
@@ -70,11 +71,33 @@ angular.module('beamng.apps')
         drawRgbFrame(data)
       })
 
-      setStatus('starting', 'STARTING REAR CAMERA…')
-      bngApi.engineLua("extensions.load('surroundView'); extensions.surroundView.startRearCamera()")
+      setStatus('starting', 'DIAG: calling Lua…')
+
+      var startLua = [
+        "guihooks.trigger('SurroundViewStatus',{state='diag',message='DIAG 1: Lua reached'})",
+        "local okLoad,loadErr=pcall(function() extensions.load('surroundView') end)",
+        "if not okLoad then guihooks.trigger('SurroundViewStatus',{state='error',message='LOAD ERROR: '..tostring(loadErr)}) return end",
+        "guihooks.trigger('SurroundViewStatus',{state='diag',message='DIAG 2: extension load returned'})",
+        "local ext=extensions.surroundView",
+        "if not ext then guihooks.trigger('SurroundViewStatus',{state='error',message='EXTENSION NIL after load'}) return end",
+        "if type(ext.startRearCamera)~='function' then guihooks.trigger('SurroundViewStatus',{state='error',message='startRearCamera missing'}) return end",
+        "guihooks.trigger('SurroundViewStatus',{state='diag',message='DIAG 3: starting camera'})",
+        "local okStart,startErr=xpcall(function() return ext.startRearCamera() end,debug.traceback)",
+        "if not okStart then guihooks.trigger('SurroundViewStatus',{state='error',message='START ERROR: '..tostring(startErr)}) end"
+      ].join('; ')
+
+      try {
+        bngApi.engineLua(startLua)
+      } catch (err) {
+        setStatus('error', 'JS→LUA ERROR: ' + String(err))
+      }
 
       scope.$on('$destroy', function () {
-        bngApi.engineLua("if extensions.surroundView then extensions.surroundView.stopRearCamera() end")
+        try {
+          bngApi.engineLua("if extensions.surroundView and extensions.surroundView.stopRearCamera then pcall(extensions.surroundView.stopRearCamera) end")
+        } catch (err) {
+          console.error('SurroundView cleanup error', err)
+        }
       })
     }
   }
