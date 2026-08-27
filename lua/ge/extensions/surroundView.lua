@@ -1,6 +1,6 @@
 local M = {}
 
--- v0.5.2: persistent offscreen RenderView, based on working BeamNG mirror code.
+-- v0.5.3: persistent offscreen RenderView, based on working BeamNG mirror code.
 local im = extensions.ui_imgui or ui_imgui
 local imUtils = require('ui/imguiUtils')
 
@@ -20,8 +20,11 @@ local tempQuat = QuatF(0, 0, 0, 1)
 local resolution = Point2I(WIDTH, HEIGHT)
 local viewport = RectI(0, 0, WIDTH, HEIGHT)
 local frustum = Frustum.construct(false, FOV, WIDTH / HEIGHT, NEAR_CLIP, FAR_CLIP)
-local uv0 = im and im.ImVec2(0, 1) or nil
-local uv1 = im and im.ImVec2(1, 0) or nil
+
+-- RenderView textures do not need vertical inversion here. Match the proven
+-- BeamNG mirror implementation: horizontal mirror only, upright image.
+local uv0 = im and im.ImVec2(1, 0) or nil
+local uv1 = im and im.ImVec2(0, 1) or nil
 
 local function emitStatus(state, message)
   if guihooks and guihooks.trigger then
@@ -146,7 +149,7 @@ function M.startRearCamera()
 
   running = true
   if showWindow then showWindow[0] = true end
-  emitStatus('live', 'GPU RENDERVIEW LIVE v0.5.2')
+  emitStatus('live', 'GPU RENDERVIEW LIVE v0.5.3')
   return true
 end
 
