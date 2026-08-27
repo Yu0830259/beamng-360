@@ -1,7 +1,7 @@
 {
   "name": "Surround View Prototype",
   "author": "Yu0830259",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Experimental BeamNG.drive 4-camera surround-view system with persistent GPU RenderViews, radial lens calibration and live bird's-eye projection",
   "directive": "surroundView",
   "domElement": "<surround-view></surround-view>",
