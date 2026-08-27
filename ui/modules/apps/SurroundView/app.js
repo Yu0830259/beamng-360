@@ -9,13 +9,16 @@ angular.module('beamng.apps')
       var root = element[0]
       var views = root.querySelectorAll('.sv-camera')
       var rear = root.querySelector('.sv-rear')
-      var rearImage = root.querySelector('#svRearImage')
+      var rearImageA = root.querySelector('#svRearImageA')
+      var rearImageB = root.querySelector('#svRearImageB')
       var statusText = root.querySelector('#svCameraStatus')
       var debugPanel = root.querySelector('#svDebugPanel')
+      var activeImage = rearImageA
+      var standbyImage = rearImageB
       var hasLiveImage = false
       var lastState = 'starting'
       var lastAcceptedFrame = 0
-      var pendingLoads = {}
+      var loadingFrame = 0
 
       for (var i = 0; i < views.length; i++) {
         views[i].classList.add('sv-camera--online')
@@ -42,55 +45,61 @@ angular.module('beamng.apps')
         }
       }
 
-      function loadBufferedFrame(frame, bufferIndex) {
-        if (!rearImage || !bufferIndex || frame <= lastAcceptedFrame) return
-        if (pendingLoads[frame]) return
+      function swapDisplayedFrame(frame, bufferIndex) {
+        if (!standbyImage || !bufferIndex || frame <= lastAcceptedFrame) return
+        if (loadingFrame && frame <= loadingFrame) return
 
-        pendingLoads[frame] = true
+        loadingFrame = frame
         var file = bufferIndex === 2 ? 'rear_b.png' : 'rear_a.png'
         var src = 'local://local/screenshots/beamng-360/' + file + '?sv=' + frame + '-' + Date.now()
-        var probe = new Image()
+        var target = standbyImage
 
-        probe.onload = function () {
-          delete pendingLoads[frame]
-          if (frame <= lastAcceptedFrame) return
+        target.onload = function () {
+          if (frame < loadingFrame || frame <= lastAcceptedFrame) return
 
           lastAcceptedFrame = frame
-          rearImage.src = src
-          if (rear) rear.classList.add('sv-camera--live')
+          loadingFrame = 0
 
-          if (!hasLiveImage) {
-            hasLiveImage = true
-          }
+          // The previous image remains fully visible until this exact image
+          // element has finished decoding. Only then do we atomically swap.
+          target.classList.add('sv-live-image--active')
+          if (activeImage) activeImage.classList.remove('sv-live-image--active')
+
+          var oldActive = activeImage
+          activeImage = target
+          standbyImage = oldActive
+
+          if (rear) rear.classList.add('sv-camera--live')
+          hasLiveImage = true
           setStatus('live', 'REAR LIVE · frame ' + frame)
         }
 
-        probe.onerror = function () {
-          delete pendingLoads[frame]
+        target.onerror = function () {
+          if (frame === loadingFrame) loadingFrame = 0
           if (!hasLiveImage && lastState !== 'error') {
-            setStatus('waiting', 'WAITING FOR BUFFER ' + bufferIndex + '…')
+            setStatus('waiting', 'WAITING FOR COMPLETE FRAME…')
           }
         }
 
-        // Small delay lets RenderView finish writing the PNG before Chromium
-        // tries to decode it. The previous valid frame stays visible meanwhile.
+        // Never clear or modify the currently visible image here.
+        // Only the hidden standby element receives the new source.
         window.setTimeout(function () {
-          probe.src = src
-        }, 45)
+          target.src = src
+        }, 70)
       }
 
       scope.$on('SurroundViewStatus', function (event, data) {
         if (!data) return
 
         if (data.state === 'frame' || data.state === 'ready') {
-          loadBufferedFrame(Number(data.frame) || 0, Number(data.buffer) || 0)
+          swapDisplayedFrame(Number(data.frame) || 0, Number(data.buffer) || 0)
           if (data.state === 'frame') return
         }
 
         setStatus(data.state, data.message || data.state)
       })
 
-      setStatus('starting', 'STARTING DOUBLE-BUFFER RENDERVIEW…')
+      setStatus('starting', 'STARTING FLICKER-SAFE RENDERVIEW…')
 
       var startLua = [
         "local okLoad,loadErr=pcall(function() extensions.load('surroundView') end)",
@@ -109,6 +118,9 @@ angular.module('beamng.apps')
       }
 
       scope.$on('$destroy', function () {
+        if (rearImageA) rearImageA.onload = rearImageA.onerror = null
+        if (rearImageB) rearImageB.onload = rearImageB.onerror = null
+
         try {
           bngApi.engineLua("if extensions.surroundView and extensions.surroundView.stopRearCamera then pcall(extensions.surroundView.stopRearCamera) end")
         } catch (err) {
