@@ -1,13 +1,12 @@
 {
   "name": "Surround View Prototype",
   "author": "Yu0830259",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Prototype 360-degree surround view UI for BeamNG.drive",
   "directive": "surroundView",
   "domElement": "<surround-view></surround-view>",
   "types": [
-    "ui.apps.categories.vehicle_info",
-    "ui.apps.categories.utility"
+    "ui.apps.categories.vehicle_info"
   ],
   "category": "Vehicle Info",
   "isAuxiliary": false,
