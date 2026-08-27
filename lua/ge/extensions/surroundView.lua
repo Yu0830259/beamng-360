@@ -1,6 +1,6 @@
 local M = {}
 
--- v0.5: persistent offscreen RenderView, no PNG/screenshot loop.
+-- v0.5.1: persistent offscreen RenderView, no PNG/screenshot loop.
 -- The rear camera is rendered continuously by BeamNG and shown directly
 -- through the named RenderView texture in an ImGui window.
 
@@ -70,8 +70,6 @@ local function trySet(obj, key, value)
 end
 
 local function configureStaticView(view)
-  -- BeamNG RenderView APIs have changed names over time. Try the currently
-  -- documented shapes first, then harmless field fallbacks.
   trySet(view, 'luaOwned', true)
   trySet(view, 'renderEditorIcons', false)
 
@@ -133,8 +131,19 @@ local function updateRenderViewCamera()
   end
 
   local matrix = MatrixF(true)
-  matrix:setFromQuat(cameraRot)
-  matrix:setPosition(cameraPos)
+  local rotOk, rotErr = pcall(function()
+    matrix:setFromQuatF(cameraRot)
+  end)
+  if not rotOk then
+    return false, 'MatrixF:setFromQuatF failed: ' .. tostring(rotErr)
+  end
+
+  local posOk, posErr = pcall(function()
+    matrix:setPosition(cameraPos)
+  end)
+  if not posOk then
+    return false, 'MatrixF:setPosition failed: ' .. tostring(posErr)
+  end
 
   local cameraOk =
     tryCall(renderView, 'setCameraMatrix', matrix) or
