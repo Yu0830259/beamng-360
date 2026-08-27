@@ -4,21 +4,25 @@ M.dependencies = {"render_renderViews"}
 
 local running = false
 local elapsed = 0
-local frameInterval = 0.25
+local frameInterval = 0.20
 local frameNumber = 0
 local WIDTH = 320
 local HEIGHT = 180
 local OUTPUT_DIR = "screenshots/beamng-360"
-local OUTPUT_FILE = OUTPUT_DIR .. "/rear.png"
+local OUTPUT_FILES = {
+  OUTPUT_DIR .. "/rear_a.png",
+  OUTPUT_DIR .. "/rear_b.png"
+}
 
-local function emitStatus(state, message)
+local function emitStatus(state, message, bufferIndex)
   if guihooks and guihooks.trigger then
     guihooks.trigger("SurroundViewStatus", {
       state = state,
       message = message or "",
       width = WIDTH,
       height = HEIGHT,
-      frame = frameNumber
+      frame = frameNumber,
+      buffer = bufferIndex or 0
     })
   end
 end
@@ -61,9 +65,6 @@ local function getRearCameraTransform(veh)
     return nil, nil, "Vehicle transform unavailable"
   end
 
-  -- Place the camera just behind and above the vehicle, facing backwards.
-  -- These offsets are intentionally generic so this first retail-drive test
-  -- works across many vehicles; per-car calibration can come later.
   local cameraPos = pos - (dir * 2.35) + (up * 1.05)
   local lookDir = (dir * -1.0) + (up * -0.06)
   local cameraRot = quatFromDir(lookDir, up)
@@ -86,16 +87,20 @@ local function captureRearFrame()
     return false, transformError or "Could not calculate rear camera transform"
   end
 
+  local nextFrame = frameNumber + 1
+  local bufferIndex = ((nextFrame - 1) % 2) + 1
+  local outputFile = OUTPUT_FILES[bufferIndex]
+
   local ok, err = pcall(function()
     render_renderViews.takeScreenshot({
-      renderViewName = "surroundViewRear",
-      filename = OUTPUT_FILE,
+      renderViewName = "surroundViewRear" .. tostring(bufferIndex),
+      filename = outputFile,
       resolution = vec3(WIDTH, HEIGHT, 0),
       pos = cameraPos,
       rot = cameraRot,
       fov = 78,
       nearPlane = 0.08,
-      screenshotDelay = 0.02
+      screenshotDelay = 0.015
     })
   end)
 
@@ -103,8 +108,8 @@ local function captureRearFrame()
     return false, tostring(err)
   end
 
-  frameNumber = frameNumber + 1
-  return true
+  frameNumber = nextFrame
+  return true, nil, bufferIndex
 end
 
 function M.startRearCamera()
@@ -126,14 +131,14 @@ function M.startRearCamera()
   running = true
   emitStatus("starting", "Retail RenderView rear camera starting")
 
-  local ok, err = captureRearFrame()
+  local ok, err, bufferIndex = captureRearFrame()
   if not ok then
     running = false
     emitStatus("error", "Rear RenderView capture failed: " .. tostring(err))
     return false
   end
 
-  emitStatus("ready", "REAR RENDERVIEW READY")
+  emitStatus("ready", "REAR DOUBLE BUFFER READY", bufferIndex)
   return true
 end
 
@@ -155,16 +160,14 @@ function M.onUpdate(dtReal, dtSim, dtRaw)
   if elapsed < frameInterval then return end
   elapsed = 0
 
-  local ok, err = captureRearFrame()
+  local ok, err, bufferIndex = captureRearFrame()
   if not ok then
     running = false
     emitStatus("error", "Rear RenderView capture failed: " .. tostring(err))
     return
   end
 
-  if frameNumber % 20 == 0 then
-    emitStatus("live", "REAR RENDERVIEW LIVE · frame " .. tostring(frameNumber))
-  end
+  emitStatus("frame", "REAR FRAME " .. tostring(frameNumber), bufferIndex)
 end
 
 function M.onExtensionUnloaded()
