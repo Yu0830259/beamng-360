@@ -1,45 +1,34 @@
 local M = {}
 
-M.dependencies = {"render_renderViews"}
+-- v0.5: persistent offscreen RenderView, no PNG/screenshot loop.
+-- The rear camera is rendered continuously by BeamNG and shown directly
+-- through the named RenderView texture in an ImGui window.
 
+local im = ui_imgui
+local imUtils = require('ui/imguiUtils')
+
+local VIEW_NAME = 'surroundViewRearLive'
+local WIDTH = 640
+local HEIGHT = 360
 local running = false
-local elapsed = 0
-local frameInterval = 0.20
-local frameNumber = 0
-local WIDTH = 320
-local HEIGHT = 180
-local OUTPUT_DIR = "screenshots/beamng-360"
-local OUTPUT_FILES = {
-  OUTPUT_DIR .. "/rear_a.png",
-  OUTPUT_DIR .. "/rear_b.png"
-}
+local renderView = nil
+local textureObject = nil
+local status = 'IDLE'
+local initTried = false
+local showWindow = im and im.BoolPtr and im.BoolPtr(true) or nil
 
-local function emitStatus(state, message, bufferIndex)
+local function emitStatus(state, message)
+  status = message or state or 'UNKNOWN'
   if guihooks and guihooks.trigger then
-    guihooks.trigger("SurroundViewStatus", {
+    guihooks.trigger('SurroundViewStatus', {
       state = state,
-      message = message or "",
+      message = status,
+      mode = 'persistent-renderview',
+      viewName = VIEW_NAME,
       width = WIDTH,
-      height = HEIGHT,
-      frame = frameNumber,
-      buffer = bufferIndex or 0
+      height = HEIGHT
     })
   end
-end
-
-local function ensureOutputDirectory()
-  if not FS then return false, "FS API unavailable" end
-
-  if not FS:directoryExists(OUTPUT_DIR) then
-    local ok, err = pcall(function()
-      FS:directoryCreate(OUTPUT_DIR, true)
-    end)
-    if not ok then
-      return false, tostring(err)
-    end
-  end
-
-  return true
 end
 
 local function getPlayerVehicleSafe()
@@ -47,12 +36,10 @@ local function getPlayerVehicleSafe()
     local ok, veh = pcall(function() return getPlayerVehicle(0) end)
     if ok and veh then return veh end
   end
-
   if be and be.getPlayerVehicle then
     local ok, veh = pcall(function() return be:getPlayerVehicle(0) end)
     if ok and veh then return veh end
   end
-
   return nil
 end
 
@@ -60,118 +47,197 @@ local function getRearCameraTransform(veh)
   local pos = veh:getPosition()
   local dir = veh:getDirectionVector()
   local up = veh:getDirectionVectorUp()
+  if not pos or not dir or not up then return nil, nil end
 
-  if not pos or not dir or not up then
-    return nil, nil, "Vehicle transform unavailable"
-  end
-
-  local cameraPos = pos - (dir * 2.35) + (up * 1.05)
-  local lookDir = (dir * -1.0) + (up * -0.06)
+  local cameraPos = pos - (dir * 2.25) + (up * 1.15)
+  local lookDir = (dir * -1.0) - (up * 0.04)
   local cameraRot = quatFromDir(lookDir, up)
-
-  return cameraPos, cameraRot, nil
+  return cameraPos, cameraRot
 end
 
-local function captureRearFrame()
-  if not render_renderViews or not render_renderViews.takeScreenshot then
-    return false, "render_renderViews.takeScreenshot is unavailable"
+local function tryCall(obj, method, ...)
+  if not obj then return false end
+  local fn = obj[method]
+  if type(fn) ~= 'function' then return false end
+  local ok = pcall(fn, obj, ...)
+  return ok
+end
+
+local function trySet(obj, key, value)
+  if not obj then return false end
+  local ok = pcall(function() obj[key] = value end)
+  return ok
+end
+
+local function configureStaticView(view)
+  -- BeamNG RenderView APIs have changed names over time. Try the currently
+  -- documented shapes first, then harmless field fallbacks.
+  trySet(view, 'luaOwned', true)
+  trySet(view, 'renderEditorIcons', false)
+
+  local resolutionSet =
+    tryCall(view, 'setResolution', WIDTH, HEIGHT) or
+    tryCall(view, 'setResolution', Point2I and Point2I(WIDTH, HEIGHT) or vec3(WIDTH, HEIGHT, 0)) or
+    trySet(view, 'resolution', Point2I and Point2I(WIDTH, HEIGHT) or vec3(WIDTH, HEIGHT, 0))
+
+  tryCall(view, 'setViewport', 0, 0, WIDTH, HEIGHT)
+  trySet(view, 'viewport', vec4 and vec4(0, 0, WIDTH, HEIGHT) or nil)
+
+  local textureSet =
+    tryCall(view, 'setNamedTexTargetColor', VIEW_NAME) or
+    tryCall(view, 'setNamedTextureTarget', VIEW_NAME) or
+    trySet(view, 'namedTexTargetColor', VIEW_NAME) or
+    trySet(view, 'textureName', VIEW_NAME)
+
+  return resolutionSet, textureSet
+end
+
+local function createPersistentView()
+  if not RenderViewManagerInstance or not RenderViewManagerInstance.getOrCreateView then
+    return false, 'RenderViewManagerInstance unavailable'
   end
+
+  local ok, view = pcall(function()
+    return RenderViewManagerInstance:getOrCreateView(VIEW_NAME)
+  end)
+  if not ok or not view then
+    return false, 'getOrCreateView failed: ' .. tostring(view)
+  end
+
+  renderView = view
+  local resOk, texOk = configureStaticView(renderView)
+  if not resOk then
+    return false, 'RenderView created, but resolution API was not recognized'
+  end
+  if not texOk then
+    return false, 'RenderView created, but named texture API was not recognized'
+  end
+
+  local okTex, tex = pcall(function()
+    return imUtils.texObj('#' .. VIEW_NAME)
+  end)
+  if okTex then textureObject = tex end
+
+  return true
+end
+
+local function updateRenderViewCamera()
+  if not renderView then return false, 'RenderView is nil' end
 
   local veh = getPlayerVehicleSafe()
-  if not veh then
-    return false, "No player vehicle found"
-  end
+  if not veh then return false, 'No player vehicle found' end
 
-  local cameraPos, cameraRot, transformError = getRearCameraTransform(veh)
+  local cameraPos, cameraRot = getRearCameraTransform(veh)
   if not cameraPos or not cameraRot then
-    return false, transformError or "Could not calculate rear camera transform"
+    return false, 'Vehicle camera transform unavailable'
   end
 
-  local nextFrame = frameNumber + 1
-  local bufferIndex = ((nextFrame - 1) % 2) + 1
-  local outputFile = OUTPUT_FILES[bufferIndex]
+  local matrix = MatrixF(true)
+  matrix:setFromQuat(cameraRot)
+  matrix:setPosition(cameraPos)
 
-  local ok, err = pcall(function()
-    render_renderViews.takeScreenshot({
-      renderViewName = "surroundViewRear" .. tostring(bufferIndex),
-      filename = outputFile,
-      resolution = vec3(WIDTH, HEIGHT, 0),
-      pos = cameraPos,
-      rot = cameraRot,
-      fov = 78,
-      nearPlane = 0.08,
-      screenshotDelay = 0.015
-    })
-  end)
+  local cameraOk =
+    tryCall(renderView, 'setCameraMatrix', matrix) or
+    trySet(renderView, 'cameraMatrix', matrix)
 
-  if not ok then
-    return false, tostring(err)
+  local aspect = WIDTH / HEIGHT
+  local frustumOk =
+    tryCall(renderView, 'setFrustum', 78, aspect, 0.08, 800) or
+    tryCall(renderView, 'setFrustum', math.rad(78), aspect, 0.08, 800)
+
+  if not frustumOk then
+    trySet(renderView, 'fov', 78)
+    trySet(renderView, 'nearPlane', 0.08)
+    trySet(renderView, 'farPlane', 800)
   end
 
-  frameNumber = nextFrame
-  return true, nil, bufferIndex
+  if not cameraOk then
+    return false, 'RenderView camera-matrix API was not recognized'
+  end
+  return true
+end
+
+local function drawLiveWindow()
+  if not im or not running then return end
+
+  if showWindow and not showWindow[0] then return end
+
+  im.SetNextWindowSize(im.ImVec2(660, 405), im.Cond_FirstUseEver)
+  local flags = bit.bor(im.WindowFlags_NoCollapse, im.WindowFlags_NoScrollbar)
+  local visible = im.Begin('Surround View - GPU Rear Camera##surroundViewGpu', showWindow, flags)
+
+  if visible then
+    im.Text('GPU RenderView / no screenshots / no PNG reload')
+    im.Separator()
+
+    if not textureObject then
+      local okTex, tex = pcall(function() return imUtils.texObj('#' .. VIEW_NAME) end)
+      if okTex then textureObject = tex end
+    end
+
+    if textureObject then
+      local texId = textureObject.texId or textureObject.id or textureObject
+      local okImg, err = pcall(function()
+        im.Image(texId, im.ImVec2(640, 360))
+      end)
+      if not okImg then
+        im.TextColored(im.ImVec4(1, 0.45, 0.45, 1), 'Texture draw error: ' .. tostring(err))
+      end
+    else
+      im.Text('Waiting for named RenderView texture #' .. VIEW_NAME)
+    end
+  end
+  im.End()
 end
 
 function M.startRearCamera()
   running = false
-  elapsed = 0
-  frameNumber = 0
+  initTried = true
+  textureObject = nil
 
-  local dirOk, dirError = ensureOutputDirectory()
-  if not dirOk then
-    emitStatus("error", "RenderView output directory failed: " .. tostring(dirError))
+  local ok, err = createPersistentView()
+  if not ok then
+    emitStatus('error', 'GPU RenderView init failed: ' .. tostring(err))
     return false
   end
 
-  if not render_renderViews or not render_renderViews.takeScreenshot then
-    emitStatus("error", "Retail RenderView API unavailable: render_renderViews.takeScreenshot missing")
+  local cameraOk, cameraErr = updateRenderViewCamera()
+  if not cameraOk then
+    emitStatus('error', 'GPU RenderView camera failed: ' .. tostring(cameraErr))
     return false
   end
 
   running = true
-  emitStatus("starting", "Retail RenderView rear camera starting")
-
-  local ok, err, bufferIndex = captureRearFrame()
-  if not ok then
-    running = false
-    emitStatus("error", "Rear RenderView capture failed: " .. tostring(err))
-    return false
-  end
-
-  emitStatus("ready", "REAR DOUBLE BUFFER READY", bufferIndex)
+  if showWindow then showWindow[0] = true end
+  emitStatus('live', 'GPU RENDERVIEW LIVE · no PNG')
   return true
 end
 
 function M.stopRearCamera()
   running = false
-  emitStatus("stopped", "Rear RenderView stopped")
+  emitStatus('stopped', 'GPU RenderView stopped')
 end
 
 function M.onInit()
-  if setExtensionUnloadMode then
-    setExtensionUnloadMode(M, "manual")
-  end
+  if setExtensionUnloadMode then setExtensionUnloadMode(M, 'manual') end
 end
 
 function M.onUpdate(dtReal, dtSim, dtRaw)
-  if not running then return end
-
-  elapsed = elapsed + (dtReal or 0)
-  if elapsed < frameInterval then return end
-  elapsed = 0
-
-  local ok, err, bufferIndex = captureRearFrame()
-  if not ok then
-    running = false
-    emitStatus("error", "Rear RenderView capture failed: " .. tostring(err))
-    return
+  if running then
+    local ok, err = updateRenderViewCamera()
+    if not ok then
+      running = false
+      emitStatus('error', 'GPU RenderView update failed: ' .. tostring(err))
+    end
   end
 
-  emitStatus("frame", "REAR FRAME " .. tostring(frameNumber), bufferIndex)
+  drawLiveWindow()
 end
 
 function M.onExtensionUnloaded()
   running = false
+  textureObject = nil
+  renderView = nil
 end
 
 return M
