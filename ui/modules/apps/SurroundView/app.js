@@ -12,16 +12,23 @@ angular.module('beamng.apps')
       var canvas = root.querySelector('#svRearCanvas')
       var ctx = canvas ? canvas.getContext('2d') : null
       var statusText = root.querySelector('#svCameraStatus')
+      var debugPanel = root.querySelector('#svDebugPanel')
 
       for (var i = 0; i < views.length; i++) {
         views[i].classList.add('sv-camera--online')
       }
 
       function setStatus(state, message) {
-        if (!statusText) return
-        statusText.textContent = message || state || 'UNKNOWN'
-        statusText.setAttribute('data-state', state || '')
-        statusText.title = message || ''
+        var text = message || state || 'UNKNOWN'
+        if (statusText) {
+          statusText.textContent = text
+          statusText.setAttribute('data-state', state || '')
+          statusText.title = text
+        }
+        if (debugPanel) {
+          debugPanel.textContent = text
+          debugPanel.setAttribute('data-state', state || '')
+        }
       }
 
       function drawRgbFrame(frame) {
