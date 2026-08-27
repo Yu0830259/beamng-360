@@ -4,9 +4,9 @@
   <div class="sv-header">
     <div>
       <div class="sv-title">SURROUND VIEW</div>
-      <div class="sv-subtitle">360° CAMERA · PROTOTYPE</div>
+      <div class="sv-subtitle">360° CAMERA · EXPERIMENTAL LIVE REAR</div>
     </div>
-    <div class="sv-status"><span></span> ACTIVE</div>
+    <div class="sv-status"><span></span> <span id="svCameraStatus">STARTING…</span></div>
   </div>
 
   <div class="sv-stage">
@@ -40,7 +40,8 @@
     </div>
 
     <div class="sv-camera sv-rear">
-      <div class="sv-label">REAR</div>
+      <canvas id="svRearCanvas" class="sv-live-canvas" width="200" height="112"></canvas>
+      <div class="sv-label">REAR · LIVE TEST</div>
       <div class="sv-grid"></div>
       <div class="sv-guide sv-guide-left"></div>
       <div class="sv-guide sv-guide-right"></div>
@@ -48,7 +49,7 @@
   </div>
 
   <div class="sv-footer">
-    <span>4 CAMERA SYSTEM</span>
-    <span>Prototype v0.2</span>
+    <span>REAR CAMERA SENSOR TEST</span>
+    <span>Prototype v0.3</span>
   </div>
 </div>
