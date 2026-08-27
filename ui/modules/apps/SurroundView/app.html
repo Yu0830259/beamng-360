@@ -4,12 +4,12 @@
   <div class="sv-header">
     <div>
       <div class="sv-title">SURROUND VIEW</div>
-      <div class="sv-subtitle">360° CAMERA · RETAIL RENDERVIEW TEST</div>
+      <div class="sv-subtitle">360° CAMERA · GPU RENDERVIEW TEST</div>
     </div>
     <div class="sv-status"><span></span> <span id="svCameraStatus">STARTING…</span></div>
   </div>
 
-  <div id="svDebugPanel" class="sv-debug-panel">Waiting for retail RenderView…</div>
+  <div id="svDebugPanel" class="sv-debug-panel">Starting persistent GPU RenderView…</div>
 
   <div class="sv-stage">
     <div class="sv-camera sv-front">
@@ -42,17 +42,16 @@
     </div>
 
     <div class="sv-camera sv-rear">
-      <img id="svRearImageA" class="sv-live-image sv-live-image--active" alt="Rear RenderView A" />
-      <img id="svRearImageB" class="sv-live-image" alt="Rear RenderView B" />
-      <div class="sv-label">REAR · RENDERVIEW</div>
+      <div class="sv-label">REAR · GPU WINDOW</div>
       <div class="sv-grid"></div>
+      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;font-size:10px;line-height:1.5;opacity:.6;z-index:2;">Live rear camera now renders in the separate GPU RenderView window.<br>No PNG files are used.</div>
       <div class="sv-guide sv-guide-left"></div>
       <div class="sv-guide sv-guide-right"></div>
     </div>
   </div>
 
   <div class="sv-footer">
-    <span>RETAIL BEAMNG.DRIVE RENDERVIEW · FLICKER-SAFE DOUBLE DISPLAY BUFFER</span>
-    <span>Prototype v0.4.1</span>
+    <span>PERSISTENT GPU RENDERVIEW · ZERO SCREENSHOT RELOADS</span>
+    <span>Prototype v0.5.0</span>
   </div>
 </div>
