@@ -3,19 +3,18 @@ angular.module('beamng.apps')
   return {
     templateUrl: '/ui/modules/apps/SurroundView/app.html',
     replace: true,
-    restrict: 'E',
+    restrict: 'EA',
+    scope: true,
     link: function (scope, element) {
-      const root = element[0]
+      var root = element[0]
+      var views = root.querySelectorAll('.sv-camera')
 
-      // Prototype state. Later these panels can be connected to
-      // BeamNG camera/sensor render targets through Lua/engine hooks.
-      const views = root.querySelectorAll('.sv-camera')
-      views.forEach((view) => {
-        view.classList.add('sv-camera--online')
-      })
+      for (var i = 0; i < views.length; i++) {
+        views[i].classList.add('sv-camera--online')
+      }
 
       scope.$on('$destroy', function () {
-        // Reserved for camera cleanup once live render targets are added.
+        // Camera cleanup will be added when live BeamNG camera feeds are implemented.
       })
     }
   }
