@@ -9,64 +9,63 @@ angular.module('beamng.apps')
       var root = element[0]
       var views = root.querySelectorAll('.sv-camera')
       var rear = root.querySelector('.sv-rear')
-      var canvas = root.querySelector('#svRearCanvas')
-      var ctx = canvas ? canvas.getContext('2d') : null
+      var rearImage = root.querySelector('#svRearImage')
       var statusText = root.querySelector('#svCameraStatus')
       var debugPanel = root.querySelector('#svDebugPanel')
+      var refreshTimer = null
+      var refreshSequence = 0
+      var hasLiveImage = false
+      var lastState = 'starting'
 
       for (var i = 0; i < views.length; i++) {
         views[i].classList.add('sv-camera--online')
       }
 
       function setStatus(state, message) {
+        lastState = state || lastState
         var text = message || state || 'UNKNOWN'
+
         if (statusText) {
           statusText.textContent = text
           statusText.setAttribute('data-state', state || '')
           statusText.title = text
         }
+
         if (debugPanel) {
           debugPanel.textContent = text
           debugPanel.setAttribute('data-state', state || '')
+          if (state === 'live' || state === 'ready') {
+            debugPanel.classList.add('sv-debug--ok')
+          } else {
+            debugPanel.classList.remove('sv-debug--ok')
+          }
         }
       }
 
-      function drawRgbFrame(frame) {
-        if (!ctx || !frame || !frame.rgb) return
+      function reloadRearImage() {
+        if (!rearImage) return
 
-        try {
-          var binary = atob(frame.rgb)
-          var width = frame.width || 200
-          var height = frame.height || 112
-          var pixelCount = width * height
+        refreshSequence++
+        var src = 'local://local/screenshots/beamng-360/rear.png?sv=' + refreshSequence + '-' + Date.now()
+        var probe = new Image()
 
-          if (binary.length < pixelCount * 3) {
-            setStatus('error', 'FRAME SIZE ERROR: ' + binary.length)
-            return
+        probe.onload = function () {
+          rearImage.src = src
+          if (rear) rear.classList.add('sv-camera--live')
+
+          if (!hasLiveImage) {
+            hasLiveImage = true
+            setStatus('live', 'REAR RENDERVIEW LIVE')
           }
-
-          if (canvas.width !== width) canvas.width = width
-          if (canvas.height !== height) canvas.height = height
-
-          var image = ctx.createImageData(width, height)
-          var dst = image.data
-          var s = 0
-          var d = 0
-
-          for (var p = 0; p < pixelCount; p++) {
-            dst[d++] = binary.charCodeAt(s++)
-            dst[d++] = binary.charCodeAt(s++)
-            dst[d++] = binary.charCodeAt(s++)
-            dst[d++] = 255
-          }
-
-          ctx.putImageData(image, 0, 0)
-          rear.classList.add('sv-camera--live')
-          setStatus('live', 'REAR LIVE')
-        } catch (err) {
-          setStatus('error', 'FRAME DECODE ERROR: ' + String(err))
-          console.error('SurroundView rear frame error', err)
         }
+
+        probe.onerror = function () {
+          if (!hasLiveImage && lastState !== 'error') {
+            setStatus('waiting', 'WAITING FOR RENDERVIEW FRAME…')
+          }
+        }
+
+        probe.src = src
       }
 
       scope.$on('SurroundViewStatus', function (event, data) {
@@ -74,21 +73,14 @@ angular.module('beamng.apps')
         setStatus(data.state, data.message || data.state)
       })
 
-      scope.$on('SurroundViewRearFrame', function (event, data) {
-        drawRgbFrame(data)
-      })
-
-      setStatus('starting', 'DIAG: calling Lua…')
+      setStatus('starting', 'STARTING RETAIL RENDERVIEW…')
 
       var startLua = [
-        "guihooks.trigger('SurroundViewStatus',{state='diag',message='DIAG 1: Lua reached'})",
         "local okLoad,loadErr=pcall(function() extensions.load('surroundView') end)",
         "if not okLoad then guihooks.trigger('SurroundViewStatus',{state='error',message='LOAD ERROR: '..tostring(loadErr)}) return end",
-        "guihooks.trigger('SurroundViewStatus',{state='diag',message='DIAG 2: extension load returned'})",
         "local ext=extensions.surroundView",
         "if not ext then guihooks.trigger('SurroundViewStatus',{state='error',message='EXTENSION NIL after load'}) return end",
         "if type(ext.startRearCamera)~='function' then guihooks.trigger('SurroundViewStatus',{state='error',message='startRearCamera missing'}) return end",
-        "guihooks.trigger('SurroundViewStatus',{state='diag',message='DIAG 3: starting camera'})",
         "local okStart,startErr=xpcall(function() return ext.startRearCamera() end,debug.traceback)",
         "if not okStart then guihooks.trigger('SurroundViewStatus',{state='error',message='START ERROR: '..tostring(startErr)}) end"
       ].join('; ')
@@ -99,7 +91,18 @@ angular.module('beamng.apps')
         setStatus('error', 'JS→LUA ERROR: ' + String(err))
       }
 
+      // Retail BeamNG.drive RenderView writes the rear frame to the user
+      // filesystem. Refresh at roughly 4 FPS; preload so a partial write does
+      // not replace the last valid image.
+      reloadRearImage()
+      refreshTimer = window.setInterval(reloadRearImage, 250)
+
       scope.$on('$destroy', function () {
+        if (refreshTimer !== null) {
+          window.clearInterval(refreshTimer)
+          refreshTimer = null
+        }
+
         try {
           bngApi.engineLua("if extensions.surroundView and extensions.surroundView.stopRearCamera then pcall(extensions.surroundView.stopRearCamera) end")
         } catch (err) {
