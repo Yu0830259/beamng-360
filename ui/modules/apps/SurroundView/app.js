@@ -12,10 +12,10 @@ angular.module('beamng.apps')
       var rearImage = root.querySelector('#svRearImage')
       var statusText = root.querySelector('#svCameraStatus')
       var debugPanel = root.querySelector('#svDebugPanel')
-      var refreshTimer = null
-      var refreshSequence = 0
       var hasLiveImage = false
       var lastState = 'starting'
+      var lastAcceptedFrame = 0
+      var pendingLoads = {}
 
       for (var i = 0; i < views.length; i++) {
         views[i].classList.add('sv-camera--online')
@@ -34,7 +34,7 @@ angular.module('beamng.apps')
         if (debugPanel) {
           debugPanel.textContent = text
           debugPanel.setAttribute('data-state', state || '')
-          if (state === 'live' || state === 'ready') {
+          if (state === 'live' || state === 'ready' || state === 'frame') {
             debugPanel.classList.add('sv-debug--ok')
           } else {
             debugPanel.classList.remove('sv-debug--ok')
@@ -42,38 +42,55 @@ angular.module('beamng.apps')
         }
       }
 
-      function reloadRearImage() {
-        if (!rearImage) return
+      function loadBufferedFrame(frame, bufferIndex) {
+        if (!rearImage || !bufferIndex || frame <= lastAcceptedFrame) return
+        if (pendingLoads[frame]) return
 
-        refreshSequence++
-        var src = 'local://local/screenshots/beamng-360/rear.png?sv=' + refreshSequence + '-' + Date.now()
+        pendingLoads[frame] = true
+        var file = bufferIndex === 2 ? 'rear_b.png' : 'rear_a.png'
+        var src = 'local://local/screenshots/beamng-360/' + file + '?sv=' + frame + '-' + Date.now()
         var probe = new Image()
 
         probe.onload = function () {
+          delete pendingLoads[frame]
+          if (frame <= lastAcceptedFrame) return
+
+          lastAcceptedFrame = frame
           rearImage.src = src
           if (rear) rear.classList.add('sv-camera--live')
 
           if (!hasLiveImage) {
             hasLiveImage = true
-            setStatus('live', 'REAR RENDERVIEW LIVE')
           }
+          setStatus('live', 'REAR LIVE · frame ' + frame)
         }
 
         probe.onerror = function () {
+          delete pendingLoads[frame]
           if (!hasLiveImage && lastState !== 'error') {
-            setStatus('waiting', 'WAITING FOR RENDERVIEW FRAME…')
+            setStatus('waiting', 'WAITING FOR BUFFER ' + bufferIndex + '…')
           }
         }
 
-        probe.src = src
+        // Small delay lets RenderView finish writing the PNG before Chromium
+        // tries to decode it. The previous valid frame stays visible meanwhile.
+        window.setTimeout(function () {
+          probe.src = src
+        }, 45)
       }
 
       scope.$on('SurroundViewStatus', function (event, data) {
         if (!data) return
+
+        if (data.state === 'frame' || data.state === 'ready') {
+          loadBufferedFrame(Number(data.frame) || 0, Number(data.buffer) || 0)
+          if (data.state === 'frame') return
+        }
+
         setStatus(data.state, data.message || data.state)
       })
 
-      setStatus('starting', 'STARTING RETAIL RENDERVIEW…')
+      setStatus('starting', 'STARTING DOUBLE-BUFFER RENDERVIEW…')
 
       var startLua = [
         "local okLoad,loadErr=pcall(function() extensions.load('surroundView') end)",
@@ -91,18 +108,7 @@ angular.module('beamng.apps')
         setStatus('error', 'JS→LUA ERROR: ' + String(err))
       }
 
-      // Retail BeamNG.drive RenderView writes the rear frame to the user
-      // filesystem. Refresh at roughly 4 FPS; preload so a partial write does
-      // not replace the last valid image.
-      reloadRearImage()
-      refreshTimer = window.setInterval(reloadRearImage, 250)
-
       scope.$on('$destroy', function () {
-        if (refreshTimer !== null) {
-          window.clearInterval(refreshTimer)
-          refreshTimer = null
-        }
-
         try {
           bngApi.engineLua("if extensions.surroundView and extensions.surroundView.stopRearCamera then pcall(extensions.surroundView.stopRearCamera) end")
         } catch (err) {
