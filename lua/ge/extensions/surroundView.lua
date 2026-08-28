@@ -1,6 +1,6 @@
 local M = {}
 
--- v0.7.5 Balanced: lighter render targets, lighter warp mesh, corrected side-camera orientation.
+-- v0.7.6 Balanced: side cameras aimed almost straight down for real surround-view ground coverage.
 local im = extensions.ui_imgui or ui_imgui
 local imUtils = require('ui/imguiUtils')
 
@@ -19,8 +19,8 @@ local cameras = {
 local calibration = {
   front={k1=-0.12,k2=0.025,flipU=false,flipV=false,rotate=0,crop={u0=0.02,v0=0.28,u1=0.98,v1=0.94},quad={{0.18,0.00},{0.82,0.00},{0.66,0.43},{0.34,0.43}}},
   rear ={k1=-0.12,k2=0.025,flipU=true, flipV=false,rotate=0,crop={u0=0.02,v0=0.28,u1=0.98,v1=0.94},quad={{0.34,0.57},{0.66,0.57},{0.82,1.00},{0.18,1.00}}},
-  left ={k1=-0.14,k2=0.030,flipU=false,flipV=false,rotate=90,crop={u0=0.02,v0=0.18,u1=0.98,v1=0.98},quad={{0.00,0.10},{0.40,0.36},{0.40,0.64},{0.00,0.90}}},
-  right={k1=-0.14,k2=0.030,flipU=true, flipV=false,rotate=-90,crop={u0=0.02,v0=0.18,u1=0.98,v1=0.98},quad={{0.60,0.36},{1.00,0.10},{1.00,0.90},{0.60,0.64}}}
+  left ={k1=-0.14,k2=0.030,flipU=false,flipV=false,rotate=90,crop={u0=0.02,v0=0.08,u1=0.98,v1=0.98},quad={{0.00,0.10},{0.40,0.36},{0.40,0.64},{0.00,0.90}}},
+  right={k1=-0.14,k2=0.030,flipU=true, flipV=false,rotate=-90,crop={u0=0.02,v0=0.08,u1=0.98,v1=0.98},quad={{0.60,0.36},{1.00,0.10},{1.00,0.90},{0.60,0.64}}}
 }
 
 local running=false
@@ -36,7 +36,7 @@ for _,cam in pairs(cameras) do cam.matrix=MatrixF(true); cam.quat=QuatF(0,0,0,1)
 
 local function emitStatus(state,msg)
   if guihooks and guihooks.trigger then
-    guihooks.trigger('SurroundViewStatus',{state=state,message=msg or state or 'UNKNOWN',mode='balanced-calibrated-four-camera-cellwarp',version='0.7.5'})
+    guihooks.trigger('SurroundViewStatus',{state=state,message=msg or state or 'UNKNOWN',mode='balanced-ground-facing-side-cameras',version='0.7.6'})
   end
 end
 
@@ -79,9 +79,10 @@ local function updateCams()
     setCam(cameras.front,p+d*2.25+u*1.05, d-u*0.55,u)
     setCam(cameras.rear, p-d*2.25+u*1.05,-d-u*0.55,u)
 
-    -- Side cameras emulate mirror-mounted surround cameras: lower and strongly aimed at the ground.
-    setCam(cameras.left, p-r*1.18+u*0.82,-r-u*1.45,u)
-    setCam(cameras.right,p+r*1.18+u*0.82, r-u*1.45,u)
+    -- Side cameras: mirror-area position, but almost straight down.
+    -- Only a small outward component remains so the image covers the ground beside the doors.
+    setCam(cameras.left, p-r*1.15+u*1.00, -r*0.22-u*1.85, u)
+    setCam(cameras.right,p+r*1.15+u*1.00,  r*0.22-u*1.85, u)
   end)
   if not ok then return false,'camera transform failed: '..tostring(err) end
   return true
@@ -178,13 +179,11 @@ local function surround()
   local p=im.GetCursorScreenPos()
   local o=im.ImVec2(p.x+math.max(0,(a.x-w)*0.5),p.y)
   local dl=im.GetWindowDrawList()
-
   dl:AddRectFilled(o,im.ImVec2(o.x+w,o.y+h),im.GetColorU322(im.ImVec4(0.025,0.03,0.035,1)),22,0)
   warpCells(dl,cameras.front,calibration.front,o,w,h)
   warpCells(dl,cameras.rear,calibration.rear,o,w,h)
   warpCells(dl,cameras.left,calibration.left,o,w,h)
   warpCells(dl,cameras.right,calibration.right,o,w,h)
-
   local cw,ch=w*0.22,h*0.40
   local cx,cy=o.x+w*0.5,o.y+h*0.5
   local c0,c1=im.ImVec2(cx-cw*0.5,cy-ch*0.5),im.ImVec2(cx+cw*0.5,cy+ch*0.5)
@@ -192,14 +191,13 @@ local function surround()
   dl:AddRect(c0,c1,im.GetColorU322(im.ImVec4(0.82,0.89,0.96,1)),cw*0.30,0,2)
   dl:AddRectFilled(im.ImVec2(cx-cw*0.30,cy-ch*0.26),im.ImVec2(cx+cw*0.30,cy+ch*0.20),im.GetColorU322(im.ImVec4(0.06,0.11,0.15,1)),cw*0.18,0)
   dl:AddRect(o,im.ImVec2(o.x+w,o.y+h),im.GetColorU322(im.ImVec4(0.12,0.55,1,0.95)),22,0,2)
-
   im.SetCursorScreenPos(o)
   im.Dummy(im.ImVec2(w,h))
 end
 
 local function calibrationPanel()
-  im.Text('v0.7.5 BALANCED: 960x540 x4 / 32x32 warp grid')
-  im.Text('Side cameras: mirror-height and strongly downward-looking')
+  im.Text('v0.7.6 BALANCED: 960x540 x4 / 32x32 warp grid')
+  im.Text('LEFT/RIGHT: near-vertical ground-facing camera angle')
   im.Separator()
   for n,c in pairs(calibration) do
     im.Text(string.format('%s  k1 %.3f  k2 %.3f  rot %d',string.upper(n),c.k1,c.k2,c.rotate or 0))
@@ -211,7 +209,7 @@ local function drawWindow()
   im.SetNextWindowSize(im.ImVec2(1000,840),im.Cond_FirstUseEver)
   local open=im.Begin('Surround View - Calibrated 360 Camera##surroundView360',showWindow,bit.bor(im.WindowFlags_NoCollapse,im.WindowFlags_NoScrollbar))
   if open then
-    im.Text('4x GPU cameras / BALANCED bird\'s-eye v0.7.5'); im.Separator()
+    im.Text('4x GPU cameras / GROUND-FACING SIDES v0.7.6'); im.Separator()
     if im.BeginTabBar('svTabs') then
       if im.BeginTabItem('360 VIEW') then
         im.Text('Balanced live bird\'s-eye composite')
@@ -240,7 +238,7 @@ function M.startSurroundView()
   local cok,cerr=updateCams(); if not cok then emitStatus('error','360 camera failed: '..tostring(cerr)); return false end
   running=true
   if showWindow then showWindow[0]=true end
-  emitStatus('live','BALANCED 4 CAMERA SURROUND LIVE v0.7.5')
+  emitStatus('live','GROUND-FACING SIDE CAMERAS LIVE v0.7.6')
   return true
 end
 function M.startRearCamera() return M.startSurroundView() end
