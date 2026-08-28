@@ -1,13 +1,18 @@
 local M = {}
 
--- v0.8.1: OEM top-down surround + live camera calibration controls.
+-- v0.9.0 REAL AVM PROJECTION
+-- Rebuilt around ground-plane inverse projection instead of hand-authored quads.
+-- Each bird's-eye cell represents a real vehicle-local ground coordinate (X,Y,0),
+-- which is projected into the four camera images using their position/orientation/FOV.
 local im = extensions.ui_imgui or ui_imgui
 local imUtils = require('ui/imguiUtils')
 
 local WIDTH, HEIGHT = 960, 540
-local FOV = math.rad(105)
+local ASPECT = WIDTH / HEIGHT
+local FOV_DEG = 105
+local FOV = math.rad(FOV_DEG)
 local NEAR_CLIP, FAR_CLIP = 0.05, 250
-local GRID = 32
+local GRID_X, GRID_Y = 44, 56
 
 local cameras = {
   front={view='svFrontView',tex='svFrontTex',label='FRONT'},
@@ -16,41 +21,44 @@ local cameras = {
   right={view='svRightView',tex='svRightTex',label='RIGHT'}
 }
 
-local calibration = {
-  front={k1=-0.05,k2=0.010,flipU=false,flipV=false,rotate=0,crop={u0=0.07,v0=0.10,u1=0.93,v1=0.92},quad={{0.20,0.00},{0.80,0.00},{0.62,0.35},{0.38,0.35}}},
-  rear ={k1=-0.05,k2=0.010,flipU=true, flipV=false,rotate=0,crop={u0=0.07,v0=0.10,u1=0.93,v1=0.92},quad={{0.38,0.65},{0.62,0.65},{0.80,1.00},{0.20,1.00}}},
-  left ={k1=-0.05,k2=0.010,flipU=false,flipV=false,rotate=-90,crop={u0=0.07,v0=0.10,u1=0.93,v1=0.92},quad={{0.00,0.12},{0.38,0.35},{0.38,0.65},{0.00,0.88}}},
-  right={k1=-0.05,k2=0.010,flipU=true, flipV=false,rotate=90,crop={u0=0.07,v0=0.10,u1=0.93,v1=0.92},quad={{0.62,0.35},{1.00,0.12},{1.00,0.88},{0.62,0.65}}}
-}
-
+-- Vehicle-local coordinates: +X forward, +Y right, +Z up.
+-- yaw: 0 front, +90 right, -90 left, 180 rear. pitch: negative looks down.
 local defaults = {
-  front={long= 2.15, lateral=0.00, height=1.45, down=2.20, outward=0.10},
-  rear ={long=-2.15, lateral=0.00, height=1.45, down=2.20, outward=0.10},
-  left ={long= 0.00, lateral=-1.12,height=1.35, down=2.20, outward=0.10},
-  right={long= 0.00, lateral= 1.12,height=1.35, down=2.20, outward=0.10}
+  front={x= 2.10,y= 0.00,z=0.82,yaw=   0,pitch=-36},
+  rear ={x=-2.10,y= 0.00,z=0.82,yaw= 180,pitch=-36},
+  left ={x= 0.20,y=-1.02,z=1.10,yaw= -90,pitch=-48},
+  right={x= 0.20,y= 1.02,z=1.10,yaw=  90,pitch=-48}
 }
 
-local controls = {}
 local function fp(v) return im and im.FloatPtr and im.FloatPtr(v) or {[0]=v} end
-local function makeControls(src)
-  return {long=fp(src.long),lateral=fp(src.lateral),height=fp(src.height),down=fp(src.down),outward=fp(src.outward)}
+local controls = {}
+for n,d in pairs(defaults) do
+  controls[n]={x=fp(d.x),y=fp(d.y),z=fp(d.z),yaw=fp(d.yaw),pitch=fp(d.pitch)}
 end
-for n,d in pairs(defaults) do controls[n]=makeControls(d) end
+
+-- Bird's-eye physical coverage in meters around vehicle center.
+local mapControls = {
+  front=fp(5.8), rear=fp(4.8), side=fp(3.6), carLength=fp(4.5), carWidth=fp(1.9)
+}
 
 local running=false
 local showWindow=im and im.BoolPtr and im.BoolPtr(true) or nil
 local resolution=Point2I(WIDTH,HEIGHT)
 local viewport=RectI(0,0,WIDTH,HEIGHT)
-local frustum=Frustum.construct(false,FOV,WIDTH/HEIGHT,NEAR_CLIP,FAR_CLIP)
+local frustum=Frustum.construct(false,FOV,ASPECT,NEAR_CLIP,FAR_CLIP)
 local uv0=im and im.ImVec2(0,0) or nil
 local uv1=im and im.ImVec2(1,1) or nil
-local uvm0=im and im.ImVec2(1,0) or nil
-local uvm1=im and im.ImVec2(0,1) or nil
 
-for _,cam in pairs(cameras) do cam.matrix=MatrixF(true); cam.quat=QuatF(0,0,0,1); cam.renderView=nil end
+for _,cam in pairs(cameras) do
+  cam.matrix=MatrixF(true)
+  cam.quat=QuatF(0,0,0,1)
+  cam.renderView=nil
+end
 
 local function emitStatus(state,msg)
-  if guihooks and guihooks.trigger then guihooks.trigger('SurroundViewStatus',{state=state,message=msg or state or 'UNKNOWN',mode='interactive-camera-calibration',version='0.8.1'}) end
+  if guihooks and guihooks.trigger then
+    guihooks.trigger('SurroundViewStatus',{state=state,message=msg or state or 'UNKNOWN',mode='ground-plane-inverse-projection',version='0.9.0'})
+  end
 end
 
 local function getVehicle()
@@ -75,29 +83,43 @@ local function basis(v)
   return p,d,u,norm(r)
 end
 
-local function setCam(cam,p,d,u)
-  local q=quatFromDir(norm(d),u)
+local function localCameraBasis(c)
+  local yaw=math.rad(c.yaw[0])
+  local pitch=math.rad(c.pitch[0])
+  local cp=math.cos(pitch)
+  local f={x=cp*math.cos(yaw),y=cp*math.sin(yaw),z=math.sin(pitch)}
+  local fl=math.sqrt(f.x*f.x+f.y*f.y+f.z*f.z); f.x,f.y,f.z=f.x/fl,f.y/fl,f.z/fl
+  -- right = worldUp x forward
+  local rr={x=-f.y,y=f.x,z=0}
+  local rl=math.sqrt(rr.x*rr.x+rr.y*rr.y); if rl<1e-6 then rr={x=0,y=1,z=0} else rr.x,rr.y=rr.x/rl,rr.y/rl end
+  -- camera up = forward x right
+  local up={x=-f.z*rr.y,y=f.z*rr.x,z=f.x*rr.y-f.y*rr.x}
+  local ul=math.sqrt(up.x*up.x+up.y*up.y+up.z*up.z); up.x,up.y,up.z=up.x/ul,up.y/ul,up.z/ul
+  return f,rr,up
+end
+
+local function toWorldVec(d,r,u,v)
+  return d*v.x+r*v.y+u*v.z
+end
+
+local function setCam(cam,pos,dir,up)
+  local q=quatFromDir(norm(dir),norm(up))
   cam.quat.x,cam.quat.y,cam.quat.z,cam.quat.w=q.x,q.y,q.z,q.w
   cam.matrix:setFromQuatF(cam.quat)
-  cam.matrix:setPosition(p)
+  cam.matrix:setPosition(pos)
   cam.renderView.cameraMatrix=cam.matrix
 end
 
 local function updateCams()
-  local v=getVehicle(); if not v then return false,'No player vehicle found' end
-  local p,d,u,r=basis(v); if not p then return false,'Vehicle transform unavailable' end
-
-  local f=controls.front; local b=controls.rear; local l=controls.left; local rr=controls.right
+  local veh=getVehicle(); if not veh then return false,'No player vehicle found' end
+  local p,d,u,r=basis(veh); if not p then return false,'Vehicle transform unavailable' end
   local ok,err=pcall(function()
-    local fp0=p+d*f.long[0]+r*f.lateral[0]+u*f.height[0]
-    local rp0=p+d*b.long[0]+r*b.lateral[0]+u*b.height[0]
-    local lp0=p+d*l.long[0]+r*l.lateral[0]+u*l.height[0]
-    local rp1=p+d*rr.long[0]+r*rr.lateral[0]+u*rr.height[0]
-
-    setCam(cameras.front,fp0, d*f.outward[0]-u*f.down[0],u)
-    setCam(cameras.rear, rp0,-d*b.outward[0]-u*b.down[0],u)
-    setCam(cameras.left, lp0,-r*l.outward[0]-u*l.down[0],u)
-    setCam(cameras.right,rp1, r*rr.outward[0]-u*rr.down[0],u)
+    for name,cam in pairs(cameras) do
+      local c=controls[name]
+      local lf,_,lu=localCameraBasis(c)
+      local pos=p+d*c.x[0]+r*c.y[0]+u*c.z[0]
+      setCam(cam,pos,toWorldVec(d,r,u,lf),toWorldVec(d,r,u,lu))
+    end
   end)
   if not ok then return false,'camera transform failed: '..tostring(err) end
   return true
@@ -120,115 +142,172 @@ local function createViews()
   return true
 end
 
-local function tex(cam) local o=imUtils.texObj('#'..cam.tex); return o and o.texId or nil end
-local function image(cam,size,mirror)
-  local id=tex(cam); if not id then im.Dummy(size); return false end
-  im.Image(id,size,mirror and uvm0 or uv0,mirror and uvm1 or uv1); return true
+local function tex(cam)
+  local o=imUtils.texObj('#'..cam.tex)
+  return o and o.texId or nil
 end
-local function tile(cam,w,h,mirror) im.BeginGroup(); im.Text(cam.label); image(cam,im.ImVec2(w,h),mirror); im.EndGroup() end
 
-local function rotateUV(c,u,v)
-  if c.rotate==90 then return 1-v,u end
-  if c.rotate==-90 then return v,1-u end
-  return u,v
+local function image(cam,size)
+  local id=tex(cam); if not id then im.Dummy(size); return false end
+  im.Image(id,size,uv0,uv1); return true
 end
-local function lensUV(c,u,v)
-  u,v=rotateUV(c,u,v)
-  if c.flipU then u=1-u end
-  if c.flipV then v=1-v end
-  local cr=c.crop
-  u=cr.u0+(cr.u1-cr.u0)*u; v=cr.v0+(cr.v1-cr.v0)*v
-  local x,y=(u-0.5)*2,(v-0.5)*2; local r2=x*x+y*y; local f=1+c.k1*r2+c.k2*r2*r2
-  return math.max(0,math.min(1,0.5+x*f*0.5)),math.max(0,math.min(1,0.5+y*f*0.5))
+
+local function tile(cam,w,h)
+  im.BeginGroup(); im.Text(cam.label); image(cam,im.ImVec2(w,h)); im.EndGroup()
 end
-local function proj(c,u,v,o,w,h)
-  local q=c.quad
-  local xt=q[1][1]*(1-u)+q[2][1]*u; local yt=q[1][2]*(1-u)+q[2][2]*u
-  local xb=q[4][1]*(1-u)+q[3][1]*u; local yb=q[4][2]*(1-u)+q[3][2]*u
-  return o.x+(xt*(1-v)+xb*v)*w,o.y+(yt*(1-v)+yb*v)*h
+
+local tanV=math.tan(FOV*0.5)
+local tanH=tanV*ASPECT
+
+-- Project one vehicle-local ground point into one source camera.
+-- Returns normalized image UV and a score. No hand-authored bird's-eye quad is involved.
+local function projectGround(name,X,Y)
+  local c=controls[name]
+  local f,rr,up=localCameraBasis(c)
+  local rx=X-c.x[0]; local ry=Y-c.y[0]; local rz=-c.z[0]
+  local zc=rx*f.x+ry*f.y+rz*f.z
+  if zc<=0.06 then return nil end
+  local xc=rx*rr.x+ry*rr.y+rz*rr.z
+  local yc=rx*up.x+ry*up.y+rz*up.z
+  local U=0.5+xc/(2*zc*tanH)
+  local V=0.5-yc/(2*zc*tanV)
+  if U<0.003 or U>0.997 or V<0.003 or V>0.997 then return nil end
+  local dist=math.sqrt(rx*rx+ry*ry+rz*rz)
+  local score=zc/math.max(dist,0.001)
+  return U,V,score
 end
-local function warpCells(dl,cam,c,o,w,h)
-  local id=tex(cam); if not id then return end
+
+local cameraOrder={'front','rear','left','right'}
+
+local function chooseCamera(X,Y)
+  local best,bU,bV,bScore=nil,nil,nil,-1e9
+  for _,name in ipairs(cameraOrder) do
+    local U,V,score=projectGround(name,X,Y)
+    if U and score>bScore then best,bU,bV,bScore=name,U,V,score end
+  end
+  return best,bU,bV
+end
+
+-- Bird's-eye output pixel -> actual ground coordinate.
+local function groundAt(gx,gy)
+  local nx=gx/GRID_X
+  local ny=gy/GRID_Y
+  local Y=(nx*2-1)*mapControls.side[0]
+  local X=mapControls.front[0]-(mapControls.front[0]+mapControls.rear[0])*ny
+  return X,Y
+end
+
+local function drawProjectedGround(dl,o,w,h)
   local white=im.GetColorU322(im.ImVec4(1,1,1,1))
-  for gy=0,GRID-1 do local v0,v1=gy/GRID,(gy+1)/GRID
-    for gx=0,GRID-1 do local u0,u1=gx/GRID,(gx+1)/GRID
-      local x1,y1=proj(c,u0,v0,o,w,h); local x2,y2=proj(c,u1,v0,o,w,h); local x3,y3=proj(c,u1,v1,o,w,h); local x4,y4=proj(c,u0,v1,o,w,h)
-      local minx=math.min(x1,x2,x3,x4)-0.35; local maxx=math.max(x1,x2,x3,x4)+0.35
-      local miny=math.min(y1,y2,y3,y4)-0.35; local maxy=math.max(y1,y2,y3,y4)+0.35
-      local su0,sv0=lensUV(c,u0,v0); local su1,sv1=lensUV(c,u1,v1)
-      dl:AddImage(id,im.ImVec2(minx,miny),im.ImVec2(maxx,maxy),im.ImVec2(su0,sv0),im.ImVec2(su1,sv1),white)
+  local cellW=w/GRID_X
+  local cellH=h/GRID_Y
+
+  for gy=0,GRID_Y-1 do
+    for gx=0,GRID_X-1 do
+      local Xc,Yc=groundAt(gx+0.5,gy+0.5)
+      local name=chooseCamera(Xc,Yc)
+      if name then
+        local X0,Y0=groundAt(gx,gy)
+        local X1,Y1=groundAt(gx+1,gy+1)
+        local u0,v0=projectGround(name,X0,Y0)
+        local u1,v1=projectGround(name,X1,Y1)
+        if u0 and u1 then
+          local id=tex(cameras[name])
+          if id then
+            local px=o.x+gx*cellW
+            local py=o.y+gy*cellH
+            -- Small overlap removes raster cracks; inverse projection supplies the UVs.
+            dl:AddImage(id,im.ImVec2(px-0.18,py-0.18),im.ImVec2(px+cellW+0.18,py+cellH+0.18),im.ImVec2(u0,v0),im.ImVec2(u1,v1),white)
+          end
+        end
+      end
     end
   end
 end
 
-local function drawVehicleAndGuides(dl,o,w,h)
-  local cx,cy=o.x+w*0.5,o.y+h*0.5; local cw,ch=w*0.24,h*0.44
-  local guide=im.GetColorU322(im.ImVec4(0.86,0.93,0.96,0.90))
-  local lx,rx=cx-cw*0.82,cx+cw*0.82; local ty,by=cy-ch*0.72,cy+ch*0.72
-  dl:AddLine(im.ImVec2(lx,ty),im.ImVec2(lx,by),guide,2); dl:AddLine(im.ImVec2(rx,ty),im.ImVec2(rx,by),guide,2)
-  local c0=im.ImVec2(cx-cw*0.5,cy-ch*0.5); local c1=im.ImVec2(cx+cw*0.5,cy+ch*0.5)
-  dl:AddRectFilled(c0,c1,im.GetColorU322(im.ImVec4(0.10,0.13,0.16,1)),cw*0.32,0)
-  dl:AddRect(c0,c1,im.GetColorU322(im.ImVec4(0.80,0.87,0.92,1)),cw*0.32,0,2)
-  dl:AddRectFilled(im.ImVec2(cx-cw*0.31,cy-ch*0.27),im.ImVec2(cx+cw*0.31,cy+ch*0.20),im.GetColorU322(im.ImVec4(0.04,0.08,0.11,1)),cw*0.17,0)
+local function drawVehicleMask(dl,o,w,h)
+  local totalX=mapControls.front[0]+mapControls.rear[0]
+  local totalY=mapControls.side[0]*2
+  local carW=w*(mapControls.carWidth[0]/totalY)
+  local carH=h*(mapControls.carLength[0]/totalX)
+  local centerY=o.y+h*(mapControls.front[0]/totalX)
+  local cx=o.x+w*0.5
+  local c0=im.ImVec2(cx-carW*0.5,centerY-carH*0.5)
+  local c1=im.ImVec2(cx+carW*0.5,centerY+carH*0.5)
+  dl:AddRectFilled(c0,c1,im.GetColorU322(im.ImVec4(0.10,0.13,0.16,1)),carW*0.22,0)
+  dl:AddRect(c0,c1,im.GetColorU322(im.ImVec4(0.83,0.89,0.94,1)),carW*0.22,0,2)
+  local glass0=im.ImVec2(cx-carW*0.30,centerY-carH*0.25)
+  local glass1=im.ImVec2(cx+carW*0.30,centerY+carH*0.18)
+  dl:AddRectFilled(glass0,glass1,im.GetColorU322(im.ImVec4(0.04,0.08,0.11,1)),carW*0.12,0)
 end
 
 local function surround()
-  local a=im.GetContentRegionAvail(); local s=math.max(300,math.min(a.x,a.y,760)); local w,h=s*0.72,s
-  local p=im.GetCursorScreenPos(); local o=im.ImVec2(p.x+math.max(0,(a.x-w)*0.5),p.y); local dl=im.GetWindowDrawList()
-  dl:AddRectFilled(o,im.ImVec2(o.x+w,o.y+h),im.GetColorU322(im.ImVec4(0.035,0.04,0.04,1)),18,0)
-  warpCells(dl,cameras.front,calibration.front,o,w,h); warpCells(dl,cameras.rear,calibration.rear,o,w,h)
-  warpCells(dl,cameras.left,calibration.left,o,w,h); warpCells(dl,cameras.right,calibration.right,o,w,h)
-  drawVehicleAndGuides(dl,o,w,h)
-  dl:AddRect(o,im.ImVec2(o.x+w,o.y+h),im.GetColorU322(im.ImVec4(0.18,0.48,0.75,0.9)),18,0,2)
+  local a=im.GetContentRegionAvail()
+  local h=math.max(380,math.min(a.y,760))
+  local physicalAspect=(mapControls.side[0]*2)/(mapControls.front[0]+mapControls.rear[0])
+  local w=math.min(a.x,h*physicalAspect)
+  h=w/physicalAspect
+  local p=im.GetCursorScreenPos()
+  local o=im.ImVec2(p.x+math.max(0,(a.x-w)*0.5),p.y)
+  local dl=im.GetWindowDrawList()
+  dl:AddRectFilled(o,im.ImVec2(o.x+w,o.y+h),im.GetColorU322(im.ImVec4(0.025,0.03,0.035,1)),12,0)
+  drawProjectedGround(dl,o,w,h)
+  drawVehicleMask(dl,o,w,h)
+  dl:AddRect(o,im.ImVec2(o.x+w,o.y+h),im.GetColorU322(im.ImVec4(0.15,0.55,1,0.9)),12,0,2)
   im.SetCursorScreenPos(o); im.Dummy(im.ImVec2(w,h))
 end
 
 local function resetCamera(name)
   local d=defaults[name]; local c=controls[name]
-  c.long[0]=d.long; c.lateral[0]=d.lateral; c.height[0]=d.height; c.down[0]=d.down; c.outward[0]=d.outward
+  c.x[0],c.y[0],c.z[0],c.yaw[0],c.pitch[0]=d.x,d.y,d.z,d.yaw,d.pitch
 end
 
-local function slider(label,ptr,minv,maxv,fmt)
-  im.SetNextItemWidth(260)
-  im.SliderFloat(label,ptr,minv,maxv,fmt or '%.2f')
+local function slider(label,ptr,a,b,fmt)
+  im.SetNextItemWidth(280); im.SliderFloat(label,ptr,a,b,fmt or '%.2f')
 end
 
-local function cameraControls(name)
+local function cameraEditor(name)
   local c=controls[name]
-  im.Separator()
-  im.Text(string.upper(name)..' CAMERA')
-  slider('Forward / Back##'..name,c.long,-4.0,4.0,'%.2f m')
-  slider('Left / Right##'..name,c.lateral,-2.5,2.5,'%.2f m')
-  slider('Height##'..name,c.height,0.20,3.0,'%.2f m')
-  slider('Downward##'..name,c.down,0.10,4.0,'%.2f')
-  slider('Outward##'..name,c.outward,-1.0,1.0,'%.2f')
+  im.Separator(); im.Text(string.upper(name)..' CAMERA')
+  slider('X Forward##'..name,c.x,-4,4,'%.2f m')
+  slider('Y Right##'..name,c.y,-2.5,2.5,'%.2f m')
+  slider('Z Height##'..name,c.z,0.2,2.5,'%.2f m')
+  slider('Yaw##'..name,c.yaw,-180,180,'%.1f deg')
+  slider('Pitch##'..name,c.pitch,-85,10,'%.1f deg')
   if im.Button('Reset '..string.upper(name)) then resetCamera(name) end
 end
 
 local function calibrationTab()
-  im.Text('LIVE CAMERA POSITION EDITOR v0.8.1')
-  im.Text('Move sliders while watching the 4 CAMERAS tab. Changes apply immediately.')
-  im.Text('Forward/Back and Left/Right are relative to the vehicle.')
-  cameraControls('front'); cameraControls('rear'); cameraControls('left'); cameraControls('right')
-  im.Separator()
+  im.Text('REAL GROUND-PLANE CALIBRATION v0.9.0')
+  im.Text('Camera position/orientation is used directly by the bird-eye projection math.')
+  im.Text('No manual trapezoid/quad calibration is used anymore.')
+  cameraEditor('front'); cameraEditor('rear'); cameraEditor('left'); cameraEditor('right')
+  im.Separator(); im.Text('BIRD-EYE PHYSICAL COVERAGE')
+  slider('Forward coverage',mapControls.front,2.5,10,'%.2f m')
+  slider('Rear coverage',mapControls.rear,2.5,10,'%.2f m')
+  slider('Side coverage',mapControls.side,2.0,7,'%.2f m')
+  slider('Vehicle length mask',mapControls.carLength,3.0,6.5,'%.2f m')
+  slider('Vehicle width mask',mapControls.carWidth,1.4,2.8,'%.2f m')
   if im.Button('RESET ALL CAMERAS') then for n,_ in pairs(controls) do resetCamera(n) end end
 end
 
 local function drawWindow()
   if not im or not running or (showWindow and not showWindow[0]) then return end
-  im.SetNextWindowSize(im.ImVec2(980,900),im.Cond_FirstUseEver)
-  local open=im.Begin('Surround View - OEM Top Down##surroundView360',showWindow,bit.bor(im.WindowFlags_NoCollapse,im.WindowFlags_NoScrollbar))
+  im.SetNextWindowSize(im.ImVec2(1040,900),im.Cond_FirstUseEver)
+  local open=im.Begin('Surround View - Real Ground Projection##surroundView360',showWindow,bit.bor(im.WindowFlags_NoCollapse,im.WindowFlags_NoScrollbar))
   if open then
-    im.Text('OEM top-down + live camera editor v0.8.1'); im.Separator()
+    im.Text('4-camera AVM / inverse ground-plane projection v0.9.0'); im.Separator()
     if im.BeginTabBar('svTabs') then
       if im.BeginTabItem('360 VIEW') then
-        local ok,err=pcall(surround); if not ok then im.TextColored(im.ImVec4(1,0.35,0.35,1),'360 draw error: '..tostring(err)) end
+        im.Text('Every output cell is projected from a real ground coordinate into the source cameras.')
+        local ok,err=pcall(surround)
+        if not ok then im.TextColored(im.ImVec4(1,0.35,0.35,1),'360 draw error: '..tostring(err)); emitStatus('error','360 draw error: '..tostring(err)) end
         im.EndTabItem()
       end
       if im.BeginTabItem('4 CAMERAS') then
-        local aw=im.GetContentRegionAvail().x; local tw=math.max(220,(aw-16)*0.5); local th=tw*HEIGHT/WIDTH
-        tile(cameras.front,tw,th,false); im.SameLine(); tile(cameras.rear,tw,th,true)
-        tile(cameras.left,tw,th,false); im.SameLine(); tile(cameras.right,tw,th,true)
+        local aw=im.GetContentRegionAvail().x; local tw=math.max(240,(aw-16)*0.5); local th=tw*HEIGHT/WIDTH
+        tile(cameras.front,tw,th); im.SameLine(); tile(cameras.rear,tw,th)
+        tile(cameras.left,tw,th); im.SameLine(); tile(cameras.right,tw,th)
         im.EndTabItem()
       end
       if im.BeginTabItem('CALIBRATION') then calibrationTab(); im.EndTabItem() end
@@ -243,7 +322,8 @@ function M.startSurroundView()
   local ok,err=createViews(); if not ok then emitStatus('error',err); return false end
   local cok,cerr=updateCams(); if not cok then emitStatus('error',cerr); return false end
   running=true; if showWindow then showWindow[0]=true end
-  emitStatus('live','INTERACTIVE CAMERA CALIBRATION v0.8.1'); return true
+  emitStatus('live','GROUND PROJECTION SURROUND LIVE v0.9.0')
+  return true
 end
 function M.startRearCamera() return M.startSurroundView() end
 function M.stopSurroundView() running=false; emitStatus('stopped','Surround View stopped') end
@@ -256,7 +336,10 @@ function M.onUpdate(dtReal,dtSim,dtRaw) drawWindow() end
 function M.onExtensionUnloaded()
   running=false
   if RenderViewManagerInstance and RenderViewManagerInstance.destroyView then
-    for _,cam in pairs(cameras) do if cam.renderView then pcall(function() RenderViewManagerInstance:destroyView(cam.renderView) end) end; cam.renderView=nil end
+    for _,cam in pairs(cameras) do
+      if cam.renderView then pcall(function() RenderViewManagerInstance:destroyView(cam.renderView) end) end
+      cam.renderView=nil
+    end
   end
 end
 
