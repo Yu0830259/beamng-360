@@ -1,8 +1,8 @@
 local M = {}
 
--- v1.1.0 REAR CAMERA ONLY + DYNAMIC STEERING GUIDELINES
--- One persistent rear RenderView. Steering input is bridged from Vehicle Lua and
--- used to draw a sampled curved predicted path. No 360 processing.
+-- v1.1.1 REAR CAMERA ONLY + CORRECTED DYNAMIC GUIDELINES
+-- Fixes perspective direction (near = wide, far = narrow) and mirrors steering
+-- direction to match the mirrored rear-camera image.
 local im = extensions.ui_imgui or ui_imgui
 local imUtils = require('ui/imguiUtils')
 
@@ -28,12 +28,13 @@ local cfg = {
   roll = fp(0.0),
   fov = fp(118.0),
 
-  -- Guide geometry / steering response.
-  guideNearHalf = fp(0.18),
-  guideFarHalf = fp(0.40),
-  guideSteerGain = fp(0.28),
-  guideCurvePower = fp(1.85),
-  steeringSmoothing = fp(0.22)
+  -- Screen-space perspective: the guide is wider near the bumper and narrower far away.
+  guideNearHalf = fp(0.36),
+  guideFarHalf = fp(0.20),
+  guideSteerGain = fp(0.25),
+  guideCurvePower = fp(1.75),
+  steeringSmoothing = fp(0.22),
+  mirrorSteering = true
 }
 
 local running = false
@@ -46,7 +47,7 @@ local uvMirror1 = im and im.ImVec2(0,1) or nil
 local steeringRaw = 0
 local steeringSmooth = 0
 local steeringPollTimer = 0
-local STEERING_POLL_INTERVAL = 0.05 -- 20 Hz vehicle->GE bridge is plenty for guides
+local STEERING_POLL_INTERVAL = 0.05
 
 local function clamp(v,a,b)
   if type(v) ~= 'number' or v ~= v then return a end
@@ -58,8 +59,8 @@ local function emitStatus(state,msg)
     guihooks.trigger('SurroundViewStatus',{
       state=state,
       message=msg or state or 'UNKNOWN',
-      mode='rear-camera-dynamic-guides',
-      version='1.1.0'
+      mode='rear-camera-dynamic-guides-corrected',
+      version='1.1.1'
     })
   end
 end
@@ -166,7 +167,6 @@ local function textureId()
   return o and o.texId or nil
 end
 
--- Called from Vehicle Lua through obj:queueGameEngineLua().
 function M.setSteeringValue(value)
   steeringRaw = clamp(tonumber(value) or 0,-1,1)
 end
@@ -179,7 +179,6 @@ local function requestSteeringFromVehicle(dt)
   local veh = getVehicle()
   if not veh or not veh.queueLuaCommand then return end
 
-  -- steering_input is BeamNG's normalized user steering input. input.steering is the fallback.
   local cmd = [[
     local s = 0
     if electrics and electrics.values then
@@ -191,24 +190,29 @@ local function requestSteeringFromVehicle(dt)
   pcall(function() veh:queueLuaCommand(cmd) end)
 end
 
+local function displayedSteering()
+  -- The camera image itself is horizontally mirrored, so the guide needs the same transform.
+  return cfg.mirrorSteering and -steeringSmooth or steeringSmooth
+end
+
 local function guidePoint(p0,w,h,t,side)
-  -- t=0 is nearest to the bumper; t=1 is furthest away.
+  -- t=0: closest to bumper (bottom). t=1: farthest away (top).
   local nearY = p0.y + h*0.79
   local farY  = p0.y + h*0.42
   local y = nearY + (farY-nearY)*t
 
-  -- Perspective width widens toward the horizon/far end in the image.
+  -- Correct perspective: near is visually wider, far is narrower.
   local half = w*(cfg.guideNearHalf[0]*(1-t) + cfg.guideFarHalf[0]*t)
 
-  -- Predicted reversing path. Steering bends progressively more with distance.
-  -- Positive steering is drawn to screen-right; use a negative gain in Calibration if a vehicle/input setup is reversed.
-  local curve = steeringSmooth * w * cfg.guideSteerGain[0] * math.pow(t,cfg.guideCurvePower[0])
+  -- Steering curvature grows with distance, because the future path diverges farther away.
+  local steer = displayedSteering()
+  local curve = steer * w * cfg.guideSteerGain[0] * math.pow(t,cfg.guideCurvePower[0])
   local cx = p0.x + w*0.5 + curve
   return im.ImVec2(cx + side*half,y)
 end
 
 local function drawCurve(dl,p0,w,h,side,color,thickness)
-  local segments = 28
+  local segments = 32
   local prev = guidePoint(p0,w,h,0,side)
   for i=1,segments do
     local t = i/segments
@@ -235,7 +239,7 @@ local function drawGuides(dl,p0,p1)
   drawCurve(dl,p0,w,h,-1,green,3)
   drawCurve(dl,p0,w,h, 1,green,3)
 
-  -- Distance bars follow exactly the same curved center path.
+  -- Red is nearest, yellow mid-distance, green farthest.
   drawCrossBar(dl,p0,w,h,0.00,red,3)
   drawCrossBar(dl,p0,w,h,0.42,yellow,3)
   drawCrossBar(dl,p0,w,h,1.00,green,3)
@@ -247,7 +251,7 @@ local function slider(label,ptr,a,b,fmt)
 end
 
 local function drawCalibration()
-  im.Text('REAR CAMERA + DYNAMIC GUIDE CALIBRATION')
+  im.Text('REAR CAMERA + DYNAMIC GUIDE CALIBRATION v1.1.1')
   slider('X Forward##rear',cfg.x,-4.0,1.0,'%.2f m')
   slider('Y Right##rear',cfg.y,-2.0,2.0,'%.2f m')
   slider('Z Height##rear',cfg.z,0.2,2.5,'%.2f m')
@@ -257,9 +261,9 @@ local function drawCalibration()
   slider('FOV##rear',cfg.fov,70,150,'%.1f deg')
 
   im.Separator()
-  im.Text(string.format('Live steering input: %.3f  smoothed: %.3f',steeringRaw,steeringSmooth))
-  slider('Guide near half-width##rear',cfg.guideNearHalf,0.08,0.35,'%.2f')
-  slider('Guide far half-width##rear',cfg.guideFarHalf,0.18,0.48,'%.2f')
+  im.Text(string.format('Live steering: %.3f | smoothed: %.3f | displayed: %.3f',steeringRaw,steeringSmooth,displayedSteering()))
+  slider('Guide NEAR half-width##rear',cfg.guideNearHalf,0.15,0.48,'%.2f')
+  slider('Guide FAR half-width##rear',cfg.guideFarHalf,0.08,0.35,'%.2f')
   slider('Steering curve gain##rear',cfg.guideSteerGain,-0.60,0.60,'%.3f')
   slider('Curve progression##rear',cfg.guideCurvePower,1.0,3.0,'%.2f')
   slider('Steering smoothing##rear',cfg.steeringSmoothing,0.05,0.80,'%.2f')
@@ -267,8 +271,8 @@ local function drawCalibration()
   if im.Button('RESET REAR CAMERA + GUIDES') then
     cfg.x[0],cfg.y[0],cfg.z[0] = -2.15,0.00,0.88
     cfg.yaw[0],cfg.pitch[0],cfg.roll[0],cfg.fov[0] = 180,-16,0,118
-    cfg.guideNearHalf[0],cfg.guideFarHalf[0] = 0.18,0.40
-    cfg.guideSteerGain[0],cfg.guideCurvePower[0],cfg.steeringSmoothing[0] = 0.28,1.85,0.22
+    cfg.guideNearHalf[0],cfg.guideFarHalf[0] = 0.36,0.20
+    cfg.guideSteerGain[0],cfg.guideCurvePower[0],cfg.steeringSmoothing[0] = 0.25,1.75,0.22
   end
 end
 
@@ -279,7 +283,7 @@ local function drawWindow()
   local open = im.Begin('Rear Camera##surroundView360',showWindow,bit.bor(im.WindowFlags_NoCollapse,im.WindowFlags_NoScrollbar))
 
   if open then
-    im.Text(string.format('REAR CAMERA v1.1.0 - dynamic steering guides | steer %.2f',steeringSmooth))
+    im.Text(string.format('REAR CAMERA v1.1.1 - corrected perspective + mirrored steering | steer %.2f',displayedSteering()))
     im.Separator()
 
     if im.BeginTabBar('rearTabs') then
@@ -319,7 +323,7 @@ function M.startRearCamera()
   running = true
   steeringRaw,steeringSmooth,steeringPollTimer = 0,0,STEERING_POLL_INTERVAL
   if showWindow then showWindow[0] = true end
-  emitStatus('live','REAR CAMERA + DYNAMIC GUIDES LIVE v1.1.0')
+  emitStatus('live','REAR CAMERA + CORRECTED DYNAMIC GUIDES LIVE v1.1.1')
   return true
 end
 
